@@ -1,0 +1,1432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BREACH // NexaCorp Red Team Op</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+@font-face{font-family:'Terminal';src:local('Courier New'),local('Consolas'),local('monospace')}
+:root{--green:#00ff41;--dim:#00aa2a;--bright:#66ff88;--red:#ff3333;--yellow:#ffaa00;--cyan:#00ccff;--bg:#0a0a0a;--panel:#111;--border:#00ff4133}
+body{background:var(--bg);color:var(--green);font-family:'Courier New',Consolas,monospace;font-size:14px;overflow:hidden;height:100vh;width:100vw}
+#scanline{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1000;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,255,65,0.03) 2px,rgba(0,255,65,0.03) 4px)}
+#flicker{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:999;animation:flicker 0.15s infinite}
+@keyframes flicker{0%{opacity:0.97}50%{opacity:1}100%{opacity:0.98}}
+#game-container{display:flex;flex-direction:column;height:100vh;position:relative}
+#top-bar{display:flex;flex-wrap:wrap;gap:8px;padding:6px 12px;background:#0d0d0d;border-bottom:1px solid var(--border);font-size:12px;min-height:32px;align-items:center;z-index:10}
+.stat{padding:2px 8px;border:1px solid var(--border);border-radius:2px}
+.stat-label{color:var(--dim)}
+.stat-value{color:var(--bright);font-weight:bold}
+.stat-red .stat-value{color:var(--red)}
+.stat-yellow .stat-value{color:var(--yellow)}
+.stat-cyan .stat-value{color:var(--cyan)}
+#detection-bar-container{width:120px;height:14px;border:1px solid var(--border);background:#111;display:inline-block;vertical-align:middle;margin-left:4px}
+#detection-bar{height:100%;width:0%;transition:width 0.5s;background:var(--green)}
+#main-area{display:flex;flex:1;overflow:hidden}
+#terminal-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#terminal{flex:1;overflow-y:auto;padding:12px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word;scrollbar-width:thin;scrollbar-color:var(--dim) var(--bg)}
+#terminal::-webkit-scrollbar{width:6px}
+#terminal::-webkit-scrollbar-track{background:var(--bg)}
+#terminal::-webkit-scrollbar-thumb{background:var(--dim)}
+#input-line{display:flex;align-items:center;padding:4px 12px;border-top:1px solid var(--border);background:#0d0d0d}
+#prompt{color:var(--bright);margin-right:6px;white-space:nowrap}
+#cmd-input{flex:1;background:transparent;border:none;color:var(--green);font-family:inherit;font-size:14px;outline:none;caret-color:var(--green)}
+#side-panel{width:260px;border-left:1px solid var(--border);padding:8px;overflow-y:auto;font-size:11px;display:flex;flex-direction:column;gap:8px;background:#0d0d0d}
+#mini-map{white-space:pre;line-height:1.3;color:var(--dim);font-size:10px}
+#side-info{white-space:pre-wrap;color:var(--dim);font-size:11px;line-height:1.4}
+.text-green{color:var(--green)}.text-red{color:var(--red)}.text-yellow{color:var(--yellow)}.text-cyan{color:var(--cyan)}.text-dim{color:var(--dim)}.text-bright{color:var(--bright)}.text-white{color:#fff}
+@media(max-width:768px){#side-panel{display:none}body{font-size:12px}#top-bar{font-size:10px}}
+</style>
+</head>
+<body>
+<div id="scanline"></div>
+<div id="flicker"></div>
+<div id="game-container">
+<div id="top-bar">
+<span class="stat"><span class="stat-label">OP: </span><span class="stat-value" id="s-callsign">---</span></span>
+<span class="stat"><span class="stat-label">SPEC: </span><span class="stat-value stat-cyan" id="s-spec">---</span></span>
+<span class="stat"><span class="stat-label">ACCESS: </span><span class="stat-value" id="s-access">0</span></span>
+<span class="stat"><span class="stat-label">STEALTH: </span><span class="stat-value" id="s-stealth">10</span></span>
+<span class="stat stat-red"><span class="stat-label">DETECT: </span><span class="stat-value" id="s-detect">0%</span><div id="detection-bar-container"><div id="detection-bar"></div></div></span>
+<span class="stat stat-yellow"><span class="stat-label">SCORE: </span><span class="stat-value" id="s-score">0</span></span>
+<span class="stat"><span class="stat-label">ZONE: </span><span class="stat-value stat-cyan" id="s-zone">---</span></span>
+<span class="stat"><span class="stat-label">TURN: </span><span class="stat-value" id="s-turn">0</span></span>
+</div>
+<div id="main-area">
+<div id="terminal-wrap">
+<div id="terminal" id="output"></div>
+<div id="input-line">
+<span id="prompt">$&gt;</span>
+<input type="text" id="cmd-input" autocomplete="off" spellcheck="false" autofocus>
+</div>
+</div>
+<div id="side-panel">
+<div style="color:var(--bright);border-bottom:1px solid var(--border);padding-bottom:4px">[ NETWORK MAP ]</div>
+<div id="mini-map"></div>
+<div style="color:var(--bright);border-bottom:1px solid var(--border);padding-bottom:4px;margin-top:8px">[ ROOM INFO ]</div>
+<div id="side-info"></div>
+</div>
+</div>
+</div>
+
+<script>
+// ============================================================
+// BREACH // NexaCorp Red Team Roguelike
+// ============================================================
+
+const $ = id => document.getElementById(id);
+const terminal = $('terminal');
+const cmdInput = $('cmd-input');
+
+// ---- Seeded Random ----
+class SRng {
+  constructor(seed) { this.s = seed || Date.now(); }
+  next() { this.s = (this.s * 1664525 + 1013904223) & 0xFFFFFFFF; return (this.s >>> 0) / 0xFFFFFFFF; }
+  int(min, max) { return Math.floor(this.next() * (max - min + 1)) + min; }
+  pick(arr) { return arr[this.int(0, arr.length - 1)]; }
+  shuffle(a) { let b=[...a]; for(let i=b.length-1;i>0;i--){let j=this.int(0,i);[b[i],b[j]]=[b[j],b[i]]} return b; }
+}
+
+// ---- Web Audio (simple) ----
+let audioCtx;
+function initAudio(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)()}
+function beep(freq,dur,type='square',vol=0.08){
+  try{initAudio();const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.type=type;o.frequency.value=freq;g.gain.value=vol;
+  o.connect(g);g.connect(audioCtx.destination);o.start();o.stop(audioCtx.currentTime+dur)}catch(e){}
+}
+function sndType(){beep(800,0.02)}
+function sndSuccess(){beep(523,0.1,'sine',0.1);setTimeout(()=>beep(659,0.1,'sine',0.1),100);setTimeout(()=>beep(784,0.15,'sine',0.1),200)}
+function sndFail(){beep(200,0.2,'sawtooth',0.08);setTimeout(()=>beep(150,0.3,'sawtooth',0.08),200)}
+function sndAlert(){for(let i=0;i<3;i++)setTimeout(()=>beep(900,0.08,'square',0.12),i*120)}
+function sndRoll(){beep(440,0.05,'triangle',0.06)}
+
+// ---- Game Data ----
+const SPECS = {
+  network: {name:'Network Specialist',bonus:{scan:2,pivot:2},desc:'Bonus to scanning & lateral movement'},
+  exploit: {name:'Exploit Developer',bonus:{exploit:2,privesc:2},desc:'Bonus to exploitation & privilege escalation'},
+  social:  {name:'Social Engineer',bonus:{phish:2,evade:1},desc:'Bonus to phishing & social attacks'},
+  malware: {name:'Malware Developer',bonus:{persist:2,evade:2},desc:'Bonus to persistence & defense evasion'}
+};
+
+const ZONE_DEFS = [
+  {id:'dmz',name:'DMZ',desc:'Perimeter network - web servers, mail gateways, VPN endpoints',depth:0,minRooms:2,maxRooms:3},
+  {id:'corp',name:'Corporate LAN',desc:'Employee workstations, file shares, printers',depth:1,minRooms:3,maxRooms:4},
+  {id:'server',name:'Server Farm',desc:'Application servers, databases, internal services',depth:2,minRooms:2,maxRooms:4},
+  {id:'mgmt',name:'Management VLAN',desc:'Executive workstations, sensitive communications',depth:3,minRooms:2,maxRooms:3},
+  {id:'dc',name:'Data Center',desc:'Domain controllers, backup servers, crown jewels',depth:4,minRooms:2,maxRooms:3}
+];
+
+const SERVICES = [
+  {name:'Apache 2.4.49',port:80,type:'web',cve:'CVE-2021-41773',cveName:'Apache Path Traversal',dc:10},
+  {name:'Nginx 1.18',port:443,type:'web',cve:'CVE-2021-23017',cveName:'Nginx DNS Resolver',dc:12},
+  {name:'OpenSSH 9.1',port:22,type:'ssh',cve:'CVE-2024-6387',cveName:'regreSSHion RCE',dc:14},
+  {name:'Microsoft IIS 10.0',port:443,type:'web',cve:'CVE-2023-36899',cveName:'IIS Elevation of Privilege',dc:13},
+  {name:'Exchange 2019',port:443,type:'mail',cve:'CVE-2023-36745',cveName:'Exchange RCE',dc:15},
+  {name:'Palo Alto PAN-OS',port:443,type:'fw',cve:'CVE-2024-3400',cveName:'PAN-OS Command Injection',dc:16},
+  {name:'SMB v3.1.1',port:445,type:'smb',cve:'CVE-2020-0796',cveName:'SMBGhost RCE',dc:12},
+  {name:'MS-SQL 2019',port:1433,type:'db',cve:'CVE-2022-29143',cveName:'SQL Server RCE',dc:14},
+  {name:'PostgreSQL 14',port:5432,type:'db',cve:'CVE-2023-5868',cveName:'PostgreSQL Memory Disclosure',dc:11},
+  {name:'RDP',port:3389,type:'rdp',cve:'CVE-2019-0708',cveName:'BlueKeep RCE',dc:13},
+  {name:'VMware vCenter',port:443,type:'mgmt',cve:'CVE-2023-34048',cveName:'vCenter Out-of-Bounds Write',dc:16},
+  {name:'Citrix ADC',port:443,type:'vpn',cve:'CVE-2023-4966',cveName:'Citrix Bleed',dc:14},
+  {name:'HTTP/2 Proxy',port:8443,type:'web',cve:'CVE-2023-44487',cveName:'HTTP/2 Rapid Reset',dc:11},
+  {name:'Jenkins 2.401',port:8080,type:'ci',cve:'CVE-2024-23897',cveName:'Jenkins Arbitrary File Read',dc:12},
+  {name:'Confluence Server',port:8090,type:'wiki',cve:'CVE-2023-22515',cveName:'Confluence Broken Access Control',dc:13},
+  {name:'FortiGate SSL-VPN',port:10443,type:'vpn',cve:'CVE-2024-21762',cveName:'FortiOS Out-of-Bounds Write',dc:15},
+  {name:'LDAP/AD DS',port:389,type:'ldap',cve:'CVE-2022-26923',cveName:'Active Directory Cert Priv Esc',dc:16},
+  {name:'WinRM',port:5985,type:'mgmt',cve:'CVE-2021-38647',cveName:'OMIGOD RCE',dc:13},
+  {name:'Docker API',port:2375,type:'container',cve:'CVE-2024-21626',cveName:'Leaky Vessel Container Escape',dc:15},
+  {name:'Kubernetes API',port:6443,type:'container',cve:'CVE-2023-5528',cveName:'K8s Command Injection',dc:16},
+];
+
+const HOSTNAMES_DMZ = ['web-ext-01','mail-gw-01','vpn-edge-01','proxy-dmz-01','waf-01','cdn-cache-01'];
+const HOSTNAMES_CORP = ['ws-fin-PC042','ws-hr-PC018','fileserv-01','print-srv-01','ws-dev-PC107','ws-mktg-PC033'];
+const HOSTNAMES_SRV = ['app-srv-01','db-prod-01','ci-jenkins-01','wiki-internal','erp-srv-01','backup-srv-01'];
+const HOSTNAMES_MGMT = ['exec-PC-CEO','exec-PC-CFO','exec-PC-CTO','mgmt-fileserv','board-collab-01'];
+const HOSTNAMES_DC = ['DC01.nexacorp.local','DC02.nexacorp.local','ca-srv-01','vault-srv-01','backup-dc-01'];
+const HOSTNAME_POOLS = [HOSTNAMES_DMZ,HOSTNAMES_CORP,HOSTNAMES_SRV,HOSTNAMES_MGMT,HOSTNAMES_DC];
+
+const LOOT_TABLE = [
+  {id:'0day',name:'0-Day Exploit',desc:'Guaranteed success on next exploit attempt. Single use.',type:'tool',rarity:0.05},
+  {id:'mimikatz',name:'Mimikatz',desc:'+3 bonus to credential harvesting & privesc.',type:'tool',rarity:0.12},
+  {id:'cobaltstrike',name:'Cobalt Strike Beacon',desc:'+2 bonus to persistence and pivoting.',type:'tool',rarity:0.10},
+  {id:'vpncreds',name:'VPN Credentials',desc:'Skip one zone when pivoting.',type:'tool',rarity:0.08},
+  {id:'sshkeys',name:'SSH Private Keys',desc:'+2 bonus to lateral movement.',type:'tool',rarity:0.15},
+  {id:'encfiles',name:'Encrypted Files',desc:'Worth bonus points if exfiltrated.',type:'data',rarity:0.18},
+  {id:'pwdump',name:'Password Dump',desc:'Reveals access codes for adjacent zones (-3 DC on exploit).',type:'intel',rarity:0.15},
+  {id:'netdiagram',name:'Network Diagram',desc:'Reveals all rooms in current zone.',type:'intel',rarity:0.12},
+  {id:'srccode',name:'Source Code Repository',desc:'Reveals vulnerabilities in server farm.',type:'intel',rarity:0.10},
+  {id:'emailarchive',name:'Email Archive',desc:'Contains sensitive exec communications. Worth big exfil points.',type:'data',rarity:0.10},
+  {id:'apikeys',name:'Cloud API Keys',desc:'Worth bonus points. +1 to exploit.',type:'data',rarity:0.12},
+];
+
+const BLUE_EVENTS = [
+  {msg:'[!] Blue Team runs a network sweep — detection risk +5%',detect:5,threshold:0},
+  {msg:'[!] New IDS signatures deployed — future scans are riskier.',detect:3,threshold:20,effect:'ids_upgrade'},
+  {msg:'[!] SOC analyst notices anomalous traffic — detection risk +8%',detect:8,threshold:30},
+  {msg:'[!] Forced password rotation initiated — existing creds may expire.',detect:0,threshold:40,effect:'pwd_rotate'},
+  {msg:'[!] Threat hunter deployed to your zone — detection risk +10%',detect:10,threshold:50},
+  {msg:'[!] EDR signatures updated — evasion is harder.',detect:5,threshold:55,effect:'edr_upgrade'},
+  {msg:'[!] Incident Response team activated — DFIR analysis in progress!',detect:8,threshold:70},
+  {msg:'[!] Network segmentation rules tightened — pivoting DC increased.',detect:3,threshold:60,effect:'seg_tighten'},
+];
+
+// ---- Game State ----
+let G = null; // game state
+let rng;
+let typeQueue = [];
+let typing = false;
+let inputMode = 'title'; // title, callsign, spec, game, gameover
+let commandHistory = [];
+let historyIdx = -1;
+
+function newGame(seed) {
+  seed = seed || (Date.now() % 1000000);
+  rng = new SRng(seed);
+  G = {
+    seed, callsign:'', spec:null, specName:'',
+    stealth:10, accessLevel:0, detection:0, score:0, turn:0,
+    tools:['nmap','netcat','burpsuite'], intel:[], loot:[], exfilData:[],
+    zones:[], currentZone:0, currentRoom:0,
+    discoveredZones:new Set([0]), discoveredRooms:{},
+    roomAccess:{}, roomPersistence:{}, roomScanned:{},
+    blueAlertLevel:0, eventsTriggered:new Set(),
+    idsUpgrade:false, edrUpgrade:false, segTighten:false, pwdRotated:false,
+    usedZeroDay:false, gameOver:false, victory:false,
+    log:[]
+  };
+  generateWorld();
+  return G;
+}
+
+function generateWorld() {
+  G.zones = ZONE_DEFS.map((zd, zi) => {
+    const numRooms = rng.int(zd.minRooms, zd.maxRooms);
+    const hostPool = rng.shuffle(HOSTNAME_POOLS[zi]);
+    const rooms = [];
+    for (let i = 0; i < numRooms; i++) {
+      const numServices = rng.int(1, 3);
+      const svcs = rng.shuffle(SERVICES).slice(0, numServices).map(s => ({...s, dc: s.dc + zi * 2}));
+      const loot = [];
+      for (const item of LOOT_TABLE) {
+        if (rng.next() < item.rarity * (1 + zi * 0.3)) loot.push({...item});
+      }
+      rooms.push({
+        hostname: hostPool[i] || `host-${zi}-${i}`,
+        services: svcs,
+        loot,
+        lootFound: false,
+        scanned: false,
+        accessed: false,
+        accessLevel: 0,
+        persistence: false,
+        dataValue: (zi + 1) * rng.int(10, 30),
+        users: rng.int(1, 10 + zi * 5),
+        os: rng.pick(['Windows Server 2019','Windows 11','Ubuntu 22.04','CentOS 8','Windows Server 2022','Debian 12']),
+      });
+    }
+    return { ...zd, rooms, discovered: zi === 0 };
+  });
+  G.discoveredRooms[0] = new Set([0]);
+}
+
+// ---- Output ----
+function print(text, cls='') {
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.textContent = text;
+  terminal.appendChild(div);
+  terminal.scrollTop = terminal.scrollHeight;
+}
+
+function printHTML(html) {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  terminal.appendChild(div);
+  terminal.scrollTop = terminal.scrollHeight;
+}
+
+function typeText(text, cls='', speed=8) {
+  return new Promise(resolve => {
+    const div = document.createElement('div');
+    if (cls) div.className = cls;
+    terminal.appendChild(div);
+    let i = 0;
+    const interval = setInterval(() => {
+      if (i < text.length) {
+        div.textContent += text[i];
+        i++;
+        terminal.scrollTop = terminal.scrollHeight;
+      } else {
+        clearInterval(interval);
+        resolve();
+      }
+    }, speed);
+  });
+}
+
+async function typeLines(lines, cls='', speed=5) {
+  for (const line of lines) {
+    await typeText(line, cls, speed);
+  }
+}
+
+function printSep() { print('─'.repeat(70), 'text-dim'); }
+
+// ---- UI Update ----
+function updateUI() {
+  if (!G) return;
+  $('s-callsign').textContent = G.callsign || '---';
+  $('s-spec').textContent = G.specName || '---';
+  $('s-access').textContent = ['None','User','Local Admin','Domain Admin'][G.accessLevel];
+  $('s-stealth').textContent = G.stealth;
+  $('s-detect').textContent = Math.min(100, G.detection) + '%';
+  $('s-score').textContent = G.score;
+  $('s-zone').textContent = G.zones.length ? G.zones[G.currentZone].name : '---';
+  $('s-turn').textContent = G.turn;
+
+  const db = $('detection-bar');
+  const d = Math.min(100, G.detection);
+  db.style.width = d + '%';
+  db.style.background = d < 25 ? 'var(--green)' : d < 50 ? 'var(--yellow)' : d < 75 ? '#ff8800' : 'var(--red)';
+
+  updateMap();
+  updateSideInfo();
+}
+
+function updateMap() {
+  if (!G || !G.zones.length) { $('mini-map').textContent = ''; return; }
+  let map = '';
+  const arrows = ['  │','  │','  │','  │'];
+  for (let i = 0; i < G.zones.length; i++) {
+    const z = G.zones[i];
+    const isCurrent = i === G.currentZone;
+    const discovered = G.discoveredZones.has(i);
+    const marker = isCurrent ? ' ◄◄ YOU' : '';
+    if (discovered) {
+      map += (isCurrent ? '► ' : '  ') + `[${z.name}]${marker}\n`;
+      const rooms = G.discoveredRooms[i] || new Set();
+      for (let r = 0; r < z.rooms.length; r++) {
+        if (rooms.has(r)) {
+          const rm = z.rooms[r];
+          const cur = isCurrent && r === G.currentRoom;
+          const acc = rm.accessLevel > 0 ? '✓' : ' ';
+          map += `    ${cur?'→':'·'} ${rm.hostname} [${acc}]\n`;
+        }
+      }
+    } else {
+      map += `  [???]\n`;
+    }
+    if (i < G.zones.length - 1) map += '    |\n';
+  }
+  $('mini-map').textContent = map;
+}
+
+function updateSideInfo() {
+  if (!G || !G.zones.length) { $('side-info').textContent = ''; return; }
+  const room = G.zones[G.currentZone].rooms[G.currentRoom];
+  let info = `Host: ${room.hostname}\n`;
+  info += `OS: ${room.os}\n`;
+  info += `Users: ~${room.users}\n`;
+  info += `Access: ${['None','User','Admin','DomAdmin'][room.accessLevel]}\n`;
+  if (room.scanned) {
+    info += `\nServices:\n`;
+    for (const s of room.services) {
+      info += ` :${s.port} ${s.name}\n`;
+    }
+  } else {
+    info += `\nServices: [not scanned]\n`;
+  }
+  if (room.persistence) info += `\n[Backdoor installed]\n`;
+  info += `\nData value: ${room.scanned ? room.dataValue + ' pts' : '???'}\n`;
+  $('side-info').textContent = info;
+}
+
+// ---- Dice ----
+function roll20() { return rng.int(1, 20); }
+function getBonus(action) {
+  let b = 0;
+  if (G.spec && SPECS[G.spec].bonus[action]) b += SPECS[G.spec].bonus[action];
+  if (action === 'privesc' && G.loot.find(l=>l.id==='mimikatz')) b += 3;
+  if (action === 'pivot' && G.loot.find(l=>l.id==='cobaltstrike')) b += 2;
+  if (action === 'pivot' && G.loot.find(l=>l.id==='sshkeys')) b += 2;
+  if (action === 'persist' && G.loot.find(l=>l.id==='cobaltstrike')) b += 2;
+  if (action === 'exploit' && G.loot.find(l=>l.id==='apikeys')) b += 1;
+  if (G.pwdRotated && (action === 'pivot' || action === 'exploit')) b -= 2;
+  return b;
+}
+
+function skillCheck(action, dc) {
+  const r = roll20();
+  const bonus = getBonus(action);
+  const total = r + bonus;
+  const success = total >= dc;
+  const crit = r === 20;
+  const critFail = r === 1;
+  sndRoll();
+  return { r, bonus, total, dc, success: crit || (success && !critFail), crit, critFail };
+}
+
+function rollResultText(check, actionName) {
+  let s = `  [ROLL] d20 = ${check.r}`;
+  if (check.bonus !== 0) s += ` + ${check.bonus} modifier`;
+  s += ` = ${check.total} vs DC ${check.dc}`;
+  if (check.crit) s += ' ★ CRITICAL SUCCESS!';
+  else if (check.critFail) s += ' ✗ CRITICAL FAILURE!';
+  else if (check.success) s += ' ✓ Success';
+  else s += ' ✗ Failed';
+  return s;
+}
+
+// ---- Detection & Blue Team ----
+function addDetection(amount) {
+  if (G.idsUpgrade) amount = Math.ceil(amount * 1.3);
+  G.detection = Math.min(100, G.detection + amount);
+  if (amount > 0) sndAlert();
+  if (G.detection >= 100) {
+    gameOver(false);
+    return true;
+  }
+  checkBlueEvents();
+  return false;
+}
+
+function reduceDetection(amount) {
+  G.detection = Math.max(0, G.detection - amount);
+}
+
+function checkBlueEvents() {
+  for (const evt of BLUE_EVENTS) {
+    if (G.detection >= evt.threshold && !G.eventsTriggered.has(evt.msg)) {
+      if (rng.next() < 0.6) {
+        G.eventsTriggered.add(evt.msg);
+        print('');
+        print(evt.msg, 'text-red');
+        if (evt.detect > 0) G.detection = Math.min(100, G.detection + evt.detect);
+        if (evt.effect === 'ids_upgrade') G.idsUpgrade = true;
+        if (evt.effect === 'edr_upgrade') G.edrUpgrade = true;
+        if (evt.effect === 'seg_tighten') G.segTighten = true;
+        if (evt.effect === 'pwd_rotate') G.pwdRotated = true;
+        if (G.detection >= 100) gameOver(false);
+      }
+    }
+  }
+}
+
+function blueTeamTurn() {
+  // Random blue team action each turn
+  if (G.detection >= 50 && rng.next() < 0.25) {
+    const sweep = rng.int(3, 8);
+    print(`\n[!] Blue Team sweep detected in your zone — +${sweep}% detection risk`, 'text-red');
+    addDetection(sweep);
+  }
+  if (G.detection >= 75 && rng.next() < 0.15) {
+    print(`[!] IR team attempts to isolate compromised hosts!`, 'text-red');
+    const room = G.zones[G.currentZone].rooms[G.currentRoom];
+    if (!room.persistence && room.accessLevel > 0) {
+      room.accessLevel = 0;
+      room.accessed = false;
+      print(`[!] You've been kicked from ${room.hostname}! Access revoked.`, 'text-red');
+    } else if (room.persistence) {
+      print(`[*] Your backdoor holds — access maintained.`, 'text-yellow');
+    }
+  }
+}
+
+// ---- Actions ----
+function doScan() {
+  G.turn++;
+  const room = G.zones[G.currentZone].rooms[G.currentRoom];
+  print('\n┌─ T1046 | Network Service Scanning ─────────────────');
+  print(`│ Scanning ${room.hostname}...`);
+
+  const check = skillCheck('scan', 8);
+  print('│ ' + rollResultText(check));
+
+  if (check.success) {
+    room.scanned = true;
+    print('│');
+    print(`│ [+] Scan results for ${room.hostname} (${room.os}):`);
+    for (const s of room.services) {
+      print(`│   PORT ${s.port}/tcp  ${s.name}`);
+      print(`│     └─ Potential: ${s.cve} (${s.cveName})  [DC:${s.dc}]`);
+    }
+    print(`│ [+] Estimated data value: ${room.dataValue} points`);
+    if (check.crit) {
+      print('│ [★] Critical! Discovered all rooms in this zone.');
+      const zi = G.currentZone;
+      if (!G.discoveredRooms[zi]) G.discoveredRooms[zi] = new Set();
+      for (let r = 0; r < G.zones[zi].rooms.length; r++) G.discoveredRooms[zi].add(r);
+      G.score += 5;
+    }
+    G.score += 5;
+    const det = rng.int(1, 3);
+    print(`│ [!] Detection risk +${det}%`);
+    print('└────────────────────────────────────────────────────');
+    addDetection(det);
+    sndSuccess();
+  } else {
+    print('│ [-] Scan returned incomplete results.');
+    if (check.critFail) {
+      print('│ [!!] Port scan triggered IDS alert! +20% detection!', 'text-red');
+      print('└────────────────────────────────────────────────────');
+      addDetection(20);
+    } else {
+      const det = rng.int(2, 5);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+    }
+    sndFail();
+  }
+  blueTeamTurn();
+  updateUI();
+}
+
+function doExploit(targetIdx) {
+  G.turn++;
+  const room = G.zones[G.currentZone].rooms[G.currentRoom];
+  if (!room.scanned) { print('\n[!] You need to SCAN this host first.', 'text-yellow'); return; }
+  if (room.accessLevel >= 1) { print('\n[!] You already have access to this host. Try PRIVESC to escalate.', 'text-yellow'); return; }
+
+  const svc = targetIdx !== undefined && room.services[targetIdx] ? room.services[targetIdx] : room.services[0];
+
+  print('\n┌─ T1190 | Exploit Public-Facing Application ────────');
+  print(`│ Target: ${svc.name} on port ${svc.port}`);
+  print(`│ Using: ${svc.cve} — ${svc.cveName}`);
+
+  // Check for 0-day
+  const hasZeroDay = G.loot.find(l => l.id === '0day');
+  if (hasZeroDay && !G.usedZeroDay) {
+    print('│ [★] Using 0-Day exploit — GUARANTEED SUCCESS');
+    G.loot = G.loot.filter(l => l.id !== '0day');
+    G.usedZeroDay = true;
+    room.accessed = true;
+    room.accessLevel = 1;
+    if (G.accessLevel < 1) G.accessLevel = 1;
+    print(`│ [+] Access gained! Level: User on ${room.hostname}`);
+    G.score += 20;
+    const det = rng.int(2, 5);
+    print(`│ [!] Detection risk +${det}%`);
+    print('└────────────────────────────────────────────────────');
+    addDetection(det);
+    checkLoot(room);
+    sndSuccess();
+    blueTeamTurn();
+    updateUI();
+    return;
+  }
+
+  let dc = svc.dc;
+  if (G.loot.find(l => l.id === 'pwdump')) dc -= 3;
+
+  const check = skillCheck('exploit', dc);
+  print('│ ' + rollResultText(check));
+
+  if (check.success) {
+    room.accessed = true;
+    room.accessLevel = 1;
+    if (G.accessLevel < 1) G.accessLevel = 1;
+    print(`│ [+] Exploitation successful!`);
+    print(`│ [+] Access: User-level shell on ${room.hostname}`);
+    if (check.crit) {
+      room.accessLevel = 2;
+      if (G.accessLevel < 2) G.accessLevel = 2;
+      print('│ [★] Critical! Direct admin access obtained!');
+      G.score += 15;
+    }
+    G.score += 15;
+    const det = rng.int(3, 8);
+    print(`│ [!] Detection risk +${det}%`);
+    print('└────────────────────────────────────────────────────');
+    addDetection(det);
+    checkLoot(room);
+    sndSuccess();
+  } else {
+    print('│ [-] Exploit failed. Target may be patched or misconfigured.');
+    if (check.critFail) {
+      print('│ [!!] Exploit crashed the service! Alarm triggered! +20%', 'text-red');
+      print('└────────────────────────────────────────────────────');
+      addDetection(20);
+    } else {
+      const det = rng.int(4, 10);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+    }
+    sndFail();
+  }
+  blueTeamTurn();
+  updateUI();
+}
+
+function doPhish() {
+  G.turn++;
+  const room = G.zones[G.currentZone].rooms[G.currentRoom];
+  const zone = G.zones[G.currentZone];
+
+  print('\n┌─ T1566 | Phishing ──────────────────────────────────');
+  print(`│ Crafting targeted phish for ${room.users} users on ${room.hostname}...`);
+
+  let dc = 13;
+  if (zone.id === 'corp') { dc -= 3; print('│ [*] Corporate LAN — users more susceptible (-3 DC)'); }
+  if (zone.id === 'mgmt') { dc += 2; print('│ [*] Management VLAN — security-aware execs (+2 DC)'); }
+
+  const check = skillCheck('phish', dc);
+  print('│ ' + rollResultText(check));
+
+  if (check.success) {
+    room.accessed = true;
+    room.accessLevel = Math.max(room.accessLevel, 1);
+    if (G.accessLevel < 1) G.accessLevel = 1;
+    print(`│ [+] User clicked the payload! Got shell on ${room.hostname}`);
+    if (check.crit) {
+      print('│ [★] Critical! Exec fell for it — harvested credentials for adjacent zone!');
+      G.loot.push({...LOOT_TABLE.find(l=>l.id==='pwdump')});
+      G.score += 20;
+    }
+    G.score += 15;
+    const det = rng.int(2, 6);
+    print(`│ [!] Detection risk +${det}%`);
+    print('└────────────────────────────────────────────────────');
+    addDetection(det);
+    checkLoot(room);
+    sndSuccess();
+  } else {
+    print('│ [-] Phishing attempt unsuccessful.');
+    if (check.critFail) {
+      print('│ [!!] User reported phish to SOC! +20% detection!', 'text-red');
+      print('└────────────────────────────────────────────────────');
+      addDetection(20);
+    } else {
+      const det = rng.int(3, 7);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+    }
+    sndFail();
+  }
+  blueTeamTurn();
+  updateUI();
+}
+
+function doPrivesc() {
+  G.turn++;
+  const room = G.zones[G.currentZone].rooms[G.currentRoom];
+  if (room.accessLevel < 1) { print('\n[!] Need at least User access first. EXPLOIT or PHISH to gain initial access.', 'text-yellow'); return; }
+  if (room.accessLevel >= 2 && G.currentZone < 4) { print('\n[!] Already have admin on this host.', 'text-yellow'); return; }
+  if (room.accessLevel >= 3) { print('\n[!] Already have Domain Admin!', 'text-yellow'); return; }
+
+  const targetLevel = room.accessLevel + 1;
+  const levelNames = ['','User','Local Admin','Domain Admin'];
+
+  print('\n┌─ T1068 | Exploitation for Privilege Escalation ─────');
+  print(`│ Attempting: ${levelNames[room.accessLevel]} → ${levelNames[targetLevel]}`);
+
+  let dc = 12 + targetLevel * 3 + G.currentZone;
+  if (targetLevel === 3) {
+    dc += 3;
+    print('│ [*] Domain Admin escalation — this is the big one.');
+    if (G.currentZone !== 4) {
+      dc += 5;
+      print('│ [*] Not on a Domain Controller — significantly harder.');
+    }
+  }
+
+  const check = skillCheck('privesc', dc);
+  print('│ ' + rollResultText(check));
+
+  if (check.success) {
+    room.accessLevel = targetLevel;
+    if (targetLevel > G.accessLevel) G.accessLevel = targetLevel;
+    print(`│ [+] Privilege escalation successful!`);
+    print(`│ [+] Now: ${levelNames[targetLevel]} on ${room.hostname}`);
+    if (targetLevel === 3) {
+      print('│ [★★★] DOMAIN ADMIN ACHIEVED! ★★★', 'text-bright');
+      G.score += 100;
+    }
+    G.score += 20 * targetLevel;
+    if (check.crit) {
+      print('│ [★] Clean escalation — minimal traces left.');
+      G.score += 10;
+    }
+    const det = rng.int(3, 8);
+    print(`│ [!] Detection risk +${det}%`);
+    print('└────────────────────────────────────────────────────');
+    addDetection(det);
+    sndSuccess();
+  } else {
+    print('│ [-] Privilege escalation failed.');
+    if (check.critFail) {
+      print('│ [!!] Triggered security alert! +20% detection!', 'text-red');
+      print('└────────────────────────────────────────────────────');
+      addDetection(20);
+    } else {
+      const det = rng.int(5, 12);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+    }
+    sndFail();
+  }
+  blueTeamTurn();
+  updateUI();
+}
+
+function doPivot(direction) {
+  G.turn++;
+  const zone = G.zones[G.currentZone];
+
+  // Check if moving to a different room in same zone or to new zone
+  if (direction === 'next' || direction === 'n') {
+    // Move to next room in zone
+    const nextRoom = G.currentRoom + 1;
+    if (nextRoom >= zone.rooms.length) {
+      print('\n[!] No more rooms in this zone. Use PIVOT FORWARD to move to next zone.', 'text-yellow');
+      return;
+    }
+    print(`\n┌─ T1021 | Lateral Movement (Same Zone) ─────────────`);
+    const dc = 8 + G.currentZone;
+    const check = skillCheck('pivot', dc);
+    print('│ ' + rollResultText(check));
+    if (check.success) {
+      G.currentRoom = nextRoom;
+      if (!G.discoveredRooms[G.currentZone]) G.discoveredRooms[G.currentZone] = new Set();
+      G.discoveredRooms[G.currentZone].add(nextRoom);
+      print(`│ [+] Moved to ${zone.rooms[nextRoom].hostname}`);
+      const det = rng.int(1, 4);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+      describeRoom();
+      sndSuccess();
+    } else {
+      print('│ [-] Lateral movement failed.');
+      const det = rng.int(3, 7);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+      sndFail();
+    }
+  } else if (direction === 'prev' || direction === 'p' || direction === 'back') {
+    const prevRoom = G.currentRoom - 1;
+    if (prevRoom < 0) {
+      if (G.currentZone > 0) {
+        // Go back a zone
+        G.currentZone--;
+        G.currentRoom = 0;
+        print(`\n[*] Fell back to ${G.zones[G.currentZone].name}`);
+        describeRoom();
+      } else {
+        print('\n[!] You\'re at the entry point. Nowhere to fall back to.', 'text-yellow');
+      }
+      updateUI();
+      return;
+    }
+    G.currentRoom = prevRoom;
+    print(`\n[*] Moved back to ${zone.rooms[prevRoom].hostname}`);
+    describeRoom();
+  } else {
+    // Forward = next zone
+    const nextZone = G.currentZone + 1;
+    if (nextZone >= G.zones.length) {
+      print('\n[!] You\'re in the deepest zone.', 'text-yellow');
+      return;
+    }
+
+    const reqAccess = Math.min(2, Math.floor(nextZone / 2) + 1);
+    const room = zone.rooms[G.currentRoom];
+    if (room.accessLevel < reqAccess) {
+      print(`\n[!] Need at least ${['None','User','Local Admin'][reqAccess]} access to pivot to ${G.zones[nextZone].name}.`, 'text-yellow');
+      return;
+    }
+
+    print(`\n┌─ T1021 | Lateral Movement (Zone Pivot) ────────────`);
+    print(`│ Pivoting: ${zone.name} → ${G.zones[nextZone].name}`);
+
+    let dc = 10 + nextZone * 3;
+    if (G.segTighten) { dc += 3; print('│ [*] Network segmentation tightened (+3 DC)'); }
+
+    // VPN creds allow zone skip
+    const hasVPN = G.loot.find(l => l.id === 'vpncreds');
+    if (hasVPN) {
+      print('│ [*] Using VPN credentials — bypassing controls');
+      dc -= 5;
+    }
+
+    const check = skillCheck('pivot', dc);
+    print('│ ' + rollResultText(check));
+
+    if (check.success) {
+      G.currentZone = nextZone;
+      G.currentRoom = 0;
+      G.discoveredZones.add(nextZone);
+      if (!G.discoveredRooms[nextZone]) G.discoveredRooms[nextZone] = new Set();
+      G.discoveredRooms[nextZone].add(0);
+      G.zones[nextZone].discovered = true;
+      print(`│ [+] Successfully pivoted to ${G.zones[nextZone].name}!`);
+      G.score += 25;
+      const det = rng.int(3, 8);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+      printZoneArt(nextZone);
+      describeRoom();
+      sndSuccess();
+    } else {
+      print('│ [-] Failed to pivot. Firewall rules blocked the connection.');
+      if (check.critFail) {
+        print('│ [!!] Pivot attempt triggered firewall alert! +20%', 'text-red');
+        print('└────────────────────────────────────────────────────');
+        addDetection(20);
+      } else {
+        const det = rng.int(5, 12);
+        print(`│ [!] Detection risk +${det}%`);
+        print('└────────────────────────────────────────────────────');
+        addDetection(det);
+      }
+      sndFail();
+    }
+  }
+  blueTeamTurn();
+  updateUI();
+}
+
+function doExfil() {
+  G.turn++;
+  const room = G.zones[G.currentZone].rooms[G.currentRoom];
+  if (room.accessLevel < 1) { print('\n[!] Need access to this host first.', 'text-yellow'); return; }
+
+  print('\n┌─ T1041 | Exfiltration Over C2 Channel ──────────────');
+  print(`│ Exfiltrating data from ${room.hostname}...`);
+
+  const dc = 10 + G.currentZone * 2;
+  const check = skillCheck('exfil', dc);
+  print('│ ' + rollResultText(check));
+
+  if (check.success) {
+    let points = room.dataValue;
+    if (check.crit) { points *= 2; print('│ [★] Critical! Found bonus classified data!'); }
+
+    // Check for encrypted files and email archive
+    const hasEncFiles = G.loot.find(l => l.id === 'encfiles');
+    const hasEmailArchive = G.loot.find(l => l.id === 'emailarchive');
+    if (hasEncFiles) { points += 30; print('│ [+] Exfiltrating encrypted files (+30 pts)'); }
+    if (hasEmailArchive) { points += 50; print('│ [+] Exfiltrating email archive (+50 pts)'); }
+
+    // Crown jewels check
+    if (G.currentZone === 4 && G.accessLevel >= 3) {
+      points += 200;
+      print('│ [★★★] CROWN JEWELS EXFILTRATED! (+200 pts)', 'text-bright');
+      G.victory = true;
+    }
+
+    G.score += points;
+    G.exfilData.push({ host: room.hostname, zone: G.zones[G.currentZone].name, points });
+    print(`│ [+] Data exfiltrated: ${points} points`);
+    const det = rng.int(5, 12);
+    print(`│ [!] Detection risk +${det}%`);
+    print('└────────────────────────────────────────────────────');
+    addDetection(det);
+    sndSuccess();
+
+    if (G.victory) {
+      setTimeout(() => gameOver(true), 500);
+    }
+  } else {
+    print('│ [-] Exfiltration failed — connection dropped.');
+    if (check.critFail) {
+      print('│ [!!] DLP system flagged the transfer! +20%', 'text-red');
+      print('└────────────────────────────────────────────────────');
+      addDetection(20);
+    } else {
+      const det = rng.int(5, 10);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+    }
+    sndFail();
+  }
+  blueTeamTurn();
+  updateUI();
+}
+
+function doPersist() {
+  G.turn++;
+  const room = G.zones[G.currentZone].rooms[G.currentRoom];
+  if (room.accessLevel < 1) { print('\n[!] Need access to this host first.', 'text-yellow'); return; }
+  if (room.persistence) { print('\n[!] Backdoor already installed on this host.', 'text-yellow'); return; }
+
+  print('\n┌─ T1053 | Scheduled Task/Job (Persistence) ─────────');
+  print(`│ Installing backdoor on ${room.hostname}...`);
+
+  const dc = 11 + G.currentZone * 2;
+  const check = skillCheck('persist', dc);
+  print('│ ' + rollResultText(check));
+
+  if (check.success) {
+    room.persistence = true;
+    print(`│ [+] Backdoor installed on ${room.hostname}`);
+    print('│ [+] You can survive being kicked from this host.');
+    if (check.crit) {
+      print('│ [★] Rootkit-level persistence — undetectable!');
+      G.score += 10;
+    }
+    G.score += 10;
+    const det = rng.int(2, 6);
+    print(`│ [!] Detection risk +${det}%`);
+    print('└────────────────────────────────────────────────────');
+    addDetection(det);
+    sndSuccess();
+  } else {
+    print('│ [-] Persistence mechanism failed to install.');
+    if (check.critFail) {
+      print('│ [!!] EDR caught the dropper! +20%', 'text-red');
+      print('└────────────────────────────────────────────────────');
+      addDetection(20);
+    } else {
+      const det = rng.int(4, 8);
+      print(`│ [!] Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+    }
+    sndFail();
+  }
+  blueTeamTurn();
+  updateUI();
+}
+
+function doEvade() {
+  G.turn++;
+  print('\n┌─ T1070 | Indicator Removal / Defense Evasion ──────');
+  print('│ Clearing logs, rotating C2 channels, covering tracks...');
+
+  let dc = 10 + (G.edrUpgrade ? 3 : 0);
+  const check = skillCheck('evade', dc);
+  print('│ ' + rollResultText(check));
+
+  if (check.success) {
+    const reduction = check.crit ? rng.int(18, 25) : rng.int(10, 15);
+    reduceDetection(reduction);
+    print(`│ [+] Detection risk reduced by ${reduction}%`);
+    if (check.crit) {
+      print('│ [★] Perfectly clean — like you were never here.');
+      G.score += 5;
+    }
+    G.score += 5;
+    print('└────────────────────────────────────────────────────');
+    sndSuccess();
+  } else {
+    print('│ [-] Evasion attempt failed.');
+    if (check.critFail) {
+      print('│ [!!] Your log-clearing triggered a SIEM alert! +20%', 'text-red');
+      print('└────────────────────────────────────────────────────');
+      addDetection(20);
+    } else {
+      const det = rng.int(2, 5);
+      print(`│ [!] Made some noise. Detection risk +${det}%`);
+      print('└────────────────────────────────────────────────────');
+      addDetection(det);
+    }
+    sndFail();
+  }
+  blueTeamTurn();
+  updateUI();
+}
+
+function doHide() {
+  G.turn++;
+  print('\n[*] Laying low... staying quiet...');
+  const reduction = 5;
+  reduceDetection(reduction);
+  print(`[+] Detection risk -${reduction}%`);
+  G.stealth = Math.min(10, G.stealth + 1);
+  blueTeamTurn();
+  updateUI();
+}
+
+function doInventory() {
+  print('\n┌─ INVENTORY ─────────────────────────────────────────');
+  print('│ TOOLS:');
+  for (const t of G.tools) print(`│   • ${t}`);
+  if (G.loot.length) {
+    print('│');
+    print('│ LOOT:');
+    for (const l of G.loot) print(`│   • ${l.name} — ${l.desc}`);
+  }
+  if (G.intel.length) {
+    print('│');
+    print('│ INTEL:');
+    for (const i of G.intel) print(`│   • ${i}`);
+  }
+  if (G.exfilData.length) {
+    print('│');
+    print('│ EXFILTRATED DATA:');
+    for (const d of G.exfilData) print(`│   • ${d.host} (${d.zone}): ${d.points} pts`);
+  }
+  print('└────────────────────────────────────────────────────');
+}
+
+function doMap() {
+  print('\n┌─ NETWORK TOPOLOGY ──────────────────────────────────');
+  for (let i = 0; i < G.zones.length; i++) {
+    const z = G.zones[i];
+    const cur = i === G.currentZone;
+    const disc = G.discoveredZones.has(i);
+    if (disc) {
+      print(`│ ${cur ? '>>>' : '   '} [${z.name}] — ${z.desc}`);
+      const rooms = G.discoveredRooms[i] || new Set();
+      for (let r = 0; r < z.rooms.length; r++) {
+        if (rooms.has(r)) {
+          const rm = z.rooms[r];
+          const rcur = cur && r === G.currentRoom;
+          const acc = rm.accessLevel > 0 ? `Access:${['','Usr','Adm','DA'][rm.accessLevel]}` : 'No access';
+          const pers = rm.persistence ? ' [BD]' : '';
+          print(`│   ${rcur ? '→' : '·'} ${rm.hostname} (${acc}${pers})`);
+        } else {
+          print(`│   · [undiscovered host]`);
+        }
+      }
+    } else {
+      print(`│     [??? — Undiscovered Zone]`);
+    }
+    if (i < G.zones.length - 1) print('│     │');
+  }
+  print('└────────────────────────────────────────────────────');
+}
+
+function showHelp() {
+  print('\n┌─ AVAILABLE COMMANDS ────────────────────────────────');
+  print('│ scan (s)      — T1046 Network Service Scanning');
+  print('│ exploit (e)   — T1190 Exploit vulnerability [e 0|1|2]');
+  print('│ phish (ph)    — T1566 Phishing attack');
+  print('│ privesc (pe)  — T1068 Privilege Escalation');
+  print('│ pivot (pv)    — T1021 Lateral Movement');
+  print('│   pivot next  — Move to next room in zone');
+  print('│   pivot forward — Move to next zone');
+  print('│   pivot back  — Move to previous room/zone');
+  print('│ exfil (x)     — T1041 Data Exfiltration');
+  print('│ persist (ps)  — T1053 Establish Persistence');
+  print('│ evade (ev)    — T1070 Defense Evasion');
+  print('│ hide (h)      — Stay quiet, reduce detection -5%');
+  print('│ inventory (i) — Check tools, loot, intel');
+  print('│ map (m)       — Show network topology');
+  print('│ look (l)      — Examine current room');
+  print('│ save          — Save game to localStorage');
+  print('│ load          — Load saved game');
+  print('│ help (?)      — Show this help');
+  print('└────────────────────────────────────────────────────');
+}
+
+function checkLoot(room) {
+  if (room.lootFound) return;
+  room.lootFound = true;
+  if (room.loot.length === 0) return;
+  print('');
+  for (const item of room.loot) {
+    print(`  [LOOT] Found: ${item.name}`, 'text-yellow');
+    print(`         ${item.desc}`, 'text-dim');
+    if (item.type === 'intel') {
+      G.intel.push(item.name);
+      if (item.id === 'netdiagram') {
+        const zi = G.currentZone;
+        if (!G.discoveredRooms[zi]) G.discoveredRooms[zi] = new Set();
+        for (let r = 0; r < G.zones[zi].rooms.length; r++) G.discoveredRooms[zi].add(r);
+        print('         → All rooms in this zone revealed!');
+      }
+      if (item.id === 'srccode') {
+        const srvZone = 2;
+        if (!G.discoveredRooms[srvZone]) G.discoveredRooms[srvZone] = new Set();
+        for (let r = 0; r < G.zones[srvZone].rooms.length; r++) {
+          G.zones[srvZone].rooms[r].scanned = true;
+          G.discoveredRooms[srvZone].add(r);
+        }
+        G.discoveredZones.add(srvZone);
+        print('         → Server Farm vulnerabilities revealed!');
+      }
+    } else {
+      G.loot.push(item);
+    }
+    G.score += 10;
+  }
+}
+
+function describeRoom() {
+  const zone = G.zones[G.currentZone];
+  const room = zone.rooms[G.currentRoom];
+  print('');
+  printSep();
+  print(`  ${room.hostname} | ${zone.name} | ${room.os}`);
+  print(`  Users: ~${room.users} | Data Value: ${room.scanned ? room.dataValue : '???'}`);
+  if (room.scanned) {
+    print(`  Services: ${room.services.map(s => s.port + '/' + s.name.split(' ')[0]).join(', ')}`);
+  }
+  if (room.accessLevel > 0) {
+    print(`  Access: ${['','User','Local Admin','Domain Admin'][room.accessLevel]}`);
+  }
+  printSep();
+}
+
+// ---- Zone ASCII Art ----
+function printZoneArt(zi) {
+  const arts = [
+    // DMZ
+    [
+      '    ╔═══════════════════════════════════╗',
+      '    ║     ◄◄◄ ENTERING DMZ ►►►         ║',
+      '    ║   Perimeter Defense Network       ║',
+      '    ║   ┌─────┐  ┌─────┐  ┌─────┐     ║',
+      '    ║   │ WEB │  │MAIL │  │ VPN │     ║',
+      '    ║   └──┬──┘  └──┬──┘  └──┬──┘     ║',
+      '    ║      └────────┼────────┘         ║',
+      '    ║           [FIREWALL]              ║',
+      '    ╚═══════════════════════════════════╝',
+    ],
+    // Corporate LAN
+    [
+      '    ╔═══════════════════════════════════╗',
+      '    ║   ◄◄◄ CORPORATE LAN ►►►          ║',
+      '    ║   Employee Network Segment        ║',
+      '    ║   🖥  🖥  🖥  🖥  🖥  🖥          ║',
+      '    ║   ┌────────────────────┐          ║',
+      '    ║   │ Workstations &     │          ║',
+      '    ║   │ File Shares        │          ║',
+      '    ║   └────────────────────┘          ║',
+      '    ╚═══════════════════════════════════╝',
+    ],
+    // Server Farm
+    [
+      '    ╔═══════════════════════════════════╗',
+      '    ║    ◄◄◄ SERVER FARM ►►►            ║',
+      '    ║    Internal Services Cluster      ║',
+      '    ║    ┌──┐┌──┐┌──┐┌──┐┌──┐          ║',
+      '    ║    │DB││AP││CI││WK││BK│          ║',
+      '    ║    └──┘└──┘└──┘└──┘└──┘          ║',
+      '    ║    ════════════════════           ║',
+      '    ║    [CORE SWITCH FABRIC]           ║',
+      '    ╚═══════════════════════════════════╝',
+    ],
+    // Management VLAN
+    [
+      '    ╔═══════════════════════════════════╗',
+      '    ║  ◄◄◄ MANAGEMENT VLAN ►►►         ║',
+      '    ║  Executive Network — RESTRICTED   ║',
+      '    ║  ┌─────────────────────────┐      ║',
+      '    ║  │ ⚠  AUTHORIZED ONLY  ⚠  │      ║',
+      '    ║  │  C-Suite Workstations   │      ║',
+      '    ║  │  Sensitive Data Stores  │      ║',
+      '    ║  └─────────────────────────┘      ║',
+      '    ╚═══════════════════════════════════╝',
+    ],
+    // Data Center
+    [
+      '    ╔═══════════════════════════════════╗',
+      '    ║   ◄◄◄ DATA CENTER ►►►            ║',
+      '    ║   ★ CROWN JEWELS LOCATED ★       ║',
+      '    ║   ┌────────┐  ┌────────┐         ║',
+      '    ║   │  DC01  │  │  DC02  │         ║',
+      '    ║   │ Active  │  │Standby │         ║',
+      '    ║   │Directory│  │  DC    │         ║',
+      '    ║   └────────┘  └────────┘         ║',
+      '    ║   [DOMAIN: NEXACORP.LOCAL]        ║',
+      '    ╚═══════════════════════════════════╝',
+    ],
+  ];
+  print('');
+  for (const line of arts[zi]) print(line, 'text-bright');
+}
+
+// ---- Title Screen ----
+function showTitle() {
+  const art = [
+    '',
+    '  ██████╗ ██████╗ ███████╗ █████╗  ██████╗██╗  ██╗',
+    '  ██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔════╝██║  ██║',
+    '  ██████╔╝██████╔╝█████╗  ███████║██║     ███████║',
+    '  ██╔══██╗██╔══██╗██╔══╝  ██╔══██║██║     ██╔══██║',
+    '  ██████╔╝██║  ██║███████╗██║  ██║╚██████╗██║  ██║',
+    '  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝',
+    '',
+    '         ── NexaCorp Red Team Operation ──',
+    '',
+    '  You are an authorized red team operator.',
+    '  Your mission: breach NexaCorp\'s defenses,',
+    '  achieve Domain Admin, and exfiltrate the crown jewels.',
+    '',
+    '  Every playthrough is procedurally generated.',
+    '  Learn real MITRE ATT&CK techniques and CVEs.',
+    '',
+    '  ─────────────────────────────────────────',
+    '  Type NEW to start a new operation',
+    '  Type NEW <seed> for a specific seed',
+    '  Type LOAD to resume a saved operation',
+    '  ─────────────────────────────────────────',
+    '',
+  ];
+  for (const line of art) print(line, 'text-bright');
+  inputMode = 'title';
+  $('prompt').textContent = '>';
+}
+
+// ---- Game Over ----
+function gameOver(won) {
+  G.gameOver = true;
+  G.victory = won;
+  inputMode = 'gameover';
+  print('');
+  printSep();
+  if (won) {
+    const victoryArt = [
+      '',
+      '  ███╗   ███╗██╗███████╗███████╗██╗ ██████╗ ███╗   ██╗',
+      '  ████╗ ████║██║██╔════╝██╔════╝██║██╔═══██╗████╗  ██║',
+      '  ██╔████╔██║██║███████╗███████╗██║██║   ██║██╔██╗ ██║',
+      '  ██║╚██╔╝██║██║╚════██║╚════██║██║██║   ██║██║╚██╗██║',
+      '  ██║ ╚═╝ ██║██║███████║███████║██║╚██████╔╝██║ ╚████║',
+      '  ╚═╝     ╚═╝╚═╝╚══════╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝',
+      '',
+      '       ██████╗ ██████╗ ███╗   ███╗██████╗ ██╗     ███████╗████████╗███████╗',
+      '      ██╔════╝██╔═══██╗████╗ ████║██╔══██╗██║     ██╔════╝╚══██╔══╝██╔════╝',
+      '      ██║     ██║   ██║██╔████╔██║██████╔╝██║     █████╗     ██║   █████╗',
+      '      ██║     ██║   ██║██║╚██╔╝██║██╔═══╝ ██║     ██╔══╝     ██║   ██╔══╝',
+      '      ╚██████╗╚██████╔╝██║ ╚═╝ ██║██║     ███████╗███████╗   ██║   ███████╗',
+      '       ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝     ╚══════╝╚══════╝   ╚═╝   ╚══════╝',
+      '',
+    ];
+    for (const l of victoryArt) print(l, 'text-bright');
+    sndSuccess();
+    setTimeout(sndSuccess, 500);
+  } else {
+    const failArt = [
+      '',
+      '   ██████╗  █████╗ ███╗   ███╗███████╗',
+      '  ██╔════╝ ██╔══██╗████╗ ████║██╔════╝',
+      '  ██║  ███╗███████║██╔████╔██║█████╗',
+      '  ██║   ██║██╔══██║██║╚██╔╝██║██╔══╝',
+      '  ╚██████╔╝██║  ██║██║ ╚═╝ ██║███████╗',
+      '   ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝',
+      '',
+      '    ██████╗ ██╗   ██╗███████╗██████╗',
+      '   ██╔═══██╗██║   ██║██╔════╝██╔══██╗',
+      '   ██║   ██║██║   ██║█████╗  ██████╔╝',
+      '   ██║   ██║╚██╗ ██╔╝██╔══╝  ██╔══██╗',
+      '   ╚██████╔╝ ╚████╔╝ ███████╗██║  ██║',
+      '    ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝',
+      '',
+      '   Blue Team caught you. IR report filed.',
+      '   Your C2 infrastructure has been burned.',
+      '',
+    ];
+    for (const l of failArt) print(l, 'text-red');
+    sndFail();
+  }
+
+  // Score breakdown
+  const rank = G.score < 100 ? 'Script Kiddie' : G.score < 200 ? 'Pentester' : G.score < 400 ? 'Red Teamer' : G.score < 600 ? 'APT Operator' : 'Nation State';
+  print('  ┌─ OPERATION DEBRIEF ─────────────────────');
+  print(`  │ Operator: ${G.callsign}`);
+  print(`  │ Specialization: ${G.specName}`);
+  print(`  │ Seed: ${G.seed}`);
+  print(`  │ Turns: ${G.turn}`);
+  print(`  │ Final Access Level: ${['None','User','Local Admin','Domain Admin'][G.accessLevel]}`);
+  print(`  │ Detection at end: ${G.detection}%`);
+  print(`  │ Zones penetrated: ${G.discoveredZones.size}/${G.zones.length}`);
+  print(`  │ Data exfiltrated: ${G.exfilData.length} packages`);
+  print(`  │ Total Score: ${G.score}`);
+  print(`  │ Rank: ${rank}`);
+  print('  └──────────────────────────────────────────');
+  print('');
+  print('  Type NEW to start a new operation.');
+  $('prompt').textContent = '>';
+  updateUI();
+}
+
+// ---- Command Processing ----
+function processCommand(raw) {
+  const input = raw.trim();
+  if (!input) return;
+
+  print(`\n$> ${input}`, 'text-dim');
+
+  if (inputMode === 'title') {
+    const parts = input.toLowerCase().split(/\s+/);
+    if (parts[0] === 'new') {
+      const seed = parts[1] ? parseInt(parts[1]) : undefined;
+      newGame(seed);
+      print(`\n[*] Operation initialized. Seed: ${G.seed}`);
+      print('[*] Enter your operator callsign:');
+      inputMode = 'callsign';
+      $('prompt').textContent = 'Callsign>';
+    } else if (parts[0] === 'load') {
+      loadGame();
+    } else {
+      print('[!] Type NEW or LOAD.', 'text-yellow');
+    }
+    return;
+  }
+
+  if (inputMode === 'callsign') {
+    G.callsign = input.substring(0, 20);
+    print(`\n[*] Callsign set: ${G.callsign}`);
+    print('\n[*] Choose your specialization:');
+    print('  1. NETWORK  — Bonus to scanning & lateral movement');
+    print('  2. EXPLOIT  — Bonus to exploitation & privilege escalation');
+    print('  3. SOCIAL   — Bonus to phishing & social attacks');
+    print('  4. MALWARE  — Bonus to persistence & defense evasion');
+    print('\nEnter 1-4 or name:');
+    inputMode = 'spec';
+    $('prompt').textContent = 'Spec>';
+    updateUI();
+    return;
+  }
+
+  if (inputMode === 'spec') {
+    const specMap = {'1':'network','2':'exploit','3':'social','4':'malware','network':'network','exploit':'exploit','social':'social','malware':'malware','net':'network','exp':'exploit','soc':'social','mal':'malware'};
+    const choice = specMap[input.toLowerCase()];
+    if (!choice) { print('[!] Invalid choice. Enter 1-4.', 'text-yellow'); return; }
+    G.spec = choice;
+    G.specName = SPECS[choice].name;
+    print(`\n[*] Specialization: ${SPECS[choice].name}`);
+    print(`[*] ${SPECS[choice].desc}`);
+    print('');
+    printSep();
+    print('  OPERATION BRIEFING');
+    printSep();
+    print('  Target: NexaCorp (Fortune 500, tech sector)');
+    print('  Objective: Achieve Domain Admin access');
+    print('  Objective: Exfiltrate crown jewels from Data Center');
+    print('  Rules of Engagement: Avoid detection at all costs');
+    print('  Starting point: DMZ perimeter');
+    printSep();
+    print('');
+    print('  Type HELP for available commands.');
+    print('');
+    inputMode = 'game';
+    $('prompt').textContent = `${G.callsign}@nexacorp$`;
+    printZoneArt(0);
+    describeRoom();
+    updateUI();
+    return;
+  }
+
+  if (inputMode === 'gameover') {
+    const parts = input.toLowerCase().split(/\s+/);
+    if (parts[0] === 'new') {
+      terminal.innerHTML = '';
+      const seed = parts[1] ? parseInt(parts[1]) : undefined;
+      newGame(seed);
+      print(`[*] Operation initialized. Seed: ${G.seed}`);
+      print('[*] Enter your operator callsign:');
+      inputMode = 'callsign';
+      $('prompt').textContent = 'Callsign>';
+    } else {
+      print('[!] Type NEW to start again.', 'text-yellow');
+    }
+    return;
+  }
+
+  // Game mode
+  if (G.gameOver) return;
+
+  const parts = input.toLowerCase().split(/\s+/);
+  const cmd = parts[0];
+
+  switch(cmd) {
+    case 'scan': case 's': doScan(); break;
+    case 'exploit': case 'e': doExploit(parts[1] !== undefined ? parseInt(parts[1]) : undefined); break;
+    case 'phish': case 'ph': doPhish(); break;
+    case 'privesc': case 'pe': doPrivesc(); break;
+    case 'pivot': case 'pv':
+      const dir = parts[1] || 'forward';
+      doPivot(dir);
+      break;
+    case 'exfil': case 'x': doExfil(); break;
+    case 'persist': case 'ps': doPersist(); break;
+    case 'evade': case 'ev': doEvade(); break;
+    case 'hide': case 'h': doHide(); break;
+    case 'inventory': case 'i': case 'inv': doInventory(); break;
+    case 'map': case 'm': doMap(); break;
+    case 'look': case 'l': describeRoom(); break;
+    case 'help': case '?': showHelp(); break;
+    case 'save': saveGame(); break;
+    case 'load': loadGame(); break;
+    case 'clear': terminal.innerHTML = ''; break;
+    default:
+      print(`[!] Unknown command: ${cmd}. Type HELP for commands.`, 'text-yellow');
+  }
+}
+
+// ---- Save/Load ----
+function saveGame() {
+  if (!G) { print('[!] No game to save.', 'text-yellow'); return; }
+  const save = JSON.parse(JSON.stringify(G));
+  save.discoveredZones = [...G.discoveredZones];
+  save.discoveredRooms = {};
+  for (const k in G.discoveredRooms) save.discoveredRooms[k] = [...G.discoveredRooms[k]];
+  save.eventsTriggered = [...G.eventsTriggered];
+  localStorage.setItem('breach_save', JSON.stringify(save));
+  print('[+] Game saved to localStorage.', 'text-bright');
+}
+
+function loadGame() {
+  const raw = localStorage.getItem('breach_save');
+  if (!raw) { print('[!] No saved game found.', 'text-yellow'); return; }
+  try {
+    G = JSON.parse(raw);
+    G.discoveredZones = new Set(G.discoveredZones);
+    const dr = {};
+    for (const k in G.discoveredRooms) dr[k] = new Set(G.discoveredRooms[k]);
+    G.discoveredRooms = dr;
+    G.eventsTriggered = new Set(G.eventsTriggered);
+    rng = new SRng(G.seed + G.turn * 7919);
+    inputMode = 'game';
+    $('prompt').textContent = `${G.callsign}@nexacorp$`;
+    print('[+] Game loaded successfully.', 'text-bright');
+    print(`[*] Operator: ${G.callsign} | ${G.specName} | Turn ${G.turn}`);
+    describeRoom();
+    updateUI();
+  } catch(e) {
+    print('[!] Failed to load save: ' + e.message, 'text-red');
+  }
+}
+
+// ---- Input Handling ----
+cmdInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    const val = cmdInput.value;
+    commandHistory.unshift(val);
+    if (commandHistory.length > 50) commandHistory.pop();
+    historyIdx = -1;
+    cmdInput.value = '';
+    processCommand(val);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (historyIdx < commandHistory.length - 1) {
+      historyIdx++;
+      cmdInput.value = commandHistory[historyIdx];
+    }
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (historyIdx > 0) {
+      historyIdx--;
+      cmdInput.value = commandHistory[historyIdx];
+    } else {
+      historyIdx = -1;
+      cmdInput.value = '';
+    }
+  } else {
+    sndType();
+  }
+});
+
+// Focus input on click anywhere
+document.addEventListener('click', () => cmdInput.focus());
+
+// ---- Init ----
+showTitle();
+cmdInput.focus();
+
+</script>
+</body>
+</html>
