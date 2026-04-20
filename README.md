@@ -21,6 +21,8 @@ You are a **red team operator**. Your mission: **breach NexaCorp**. Real MITRE A
 
 Every run is different. Every network is procedurally generated. The blue team is watching. The clock is ticking. One wrong move and you're burned.
 
+![Screenshot](screenshot.png)
+
 ---
 
 ## ✨ Features
